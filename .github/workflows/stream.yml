@@ -1,0 +1,262 @@
+name: s
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Channel name (live) or VOD/Clip URL'
+        required: true
+        type: string
+      mode:
+        description: 'live_url: watch live without VPN | download: save VOD/Clip'
+        required: true
+        type: choice
+        options:
+          - live_url
+          - download
+        default: 'live_url'
+      quality:
+        description: 'Quality: best / 720p60 / 480p / 360p / audio_only / worst'
+        required: false
+        type: string
+        default: 'best'
+      output_folder:
+        description: 'Folder for saved files (download mode only)'
+        required: false
+        type: string
+        default: 'downloads'
+      use_cookies:
+        description: 'Use TWITCH_COOKIES for subscriber-only content'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -U yt-dlp
+          sudo apt-get update -q
+          sudo apt-get install -y bc p7zip-full
+
+      # ─── MODE: live_url ────────────────────────────────────────────────────
+      # Extracts the unblocked CDN HLS URL so you can watch in VLC without VPN.
+      # The URL is stored in an encrypted .7z — open it with ENCRYPT_PASSWORD
+      # and load the .m3u file into VLC: Media → Open Network Stream.
+      - name: Extract live stream URL
+        if: github.event.inputs.mode == 'live_url'
+        env:
+          INPUT_TARGET: ${{ github.event.inputs.target }}
+          INPUT_QUALITY: ${{ github.event.inputs.quality }}
+          INPUT_USE_COOKIES: ${{ github.event.inputs.use_cookies }}
+          TWITCH_COOKIES: ${{ secrets.TWITCH_COOKIES }}
+          ENCRYPT_PASS: ${{ secrets.ENCRYPT_PASSWORD }}
+        shell: bash
+        run: |
+          echo "::add-mask::$INPUT_TARGET"
+
+          if [ -z "$ENCRYPT_PASS" ]; then
+            echo "ERROR: ENCRYPT_PASSWORD secret is not set"
+            exit 1
+          fi
+
+          # Accept bare channel name or full URL
+          if [[ "$INPUT_TARGET" =~ ^https?:// ]]; then
+            URL="$INPUT_TARGET"
+          else
+            URL="https://www.twitch.tv/$INPUT_TARGET"
+          fi
+
+          COOKIE_ARG=""
+          if [[ "$INPUT_USE_COOKIES" == "true" && -n "$TWITCH_COOKIES" ]]; then
+            printf '%s' "$TWITCH_COOKIES" > /tmp/tw_cookies.txt
+            COOKIE_ARG="--cookies /tmp/tw_cookies.txt"
+          fi
+
+          case "$INPUT_QUALITY" in
+            best)       FORMAT="best" ;;
+            720p60)     FORMAT="720p60/720p/best" ;;
+            480p)       FORMAT="480p/best" ;;
+            360p)       FORMAT="360p/best" ;;
+            audio_only) FORMAT="audio_only/worst" ;;
+            worst)      FORMAT="worst" ;;
+            *)          FORMAT="$INPUT_QUALITY" ;;
+          esac
+
+          echo "Fetching stream URL..."
+          STREAM_URL=$(yt-dlp \
+            --get-url \
+            --format "$FORMAT" \
+            --no-check-certificate \
+            --no-color \
+            $COOKIE_ARG \
+            "$URL" 2>&1 | grep '^https' | head -1)
+
+          if [ -f /tmp/tw_cookies.txt ]; then shred -u /tmp/tw_cookies.txt; fi
+
+          if [ -z "$STREAM_URL" ]; then
+            echo "ERROR: Could not extract stream URL."
+            echo "  - Channel may be offline"
+            echo "  - URL may be invalid"
+            echo "  - Subscriber-only stream requires TWITCH_COOKIES"
+            exit 1
+          fi
+
+          echo "::add-mask::$STREAM_URL"
+          echo "Stream URL extracted successfully."
+
+          # Write a .m3u playlist — VLC opens it directly
+          TMPDIR_PATH=$(mktemp -d)
+          M3U_FILE="$TMPDIR_PATH/stream.m3u"
+          printf '#EXTM3U\n#EXTINF:-1,Stream\n%s\n' "$STREAM_URL" > "$M3U_FILE"
+
+          # Encrypt so the URL is not visible in the public repo
+          RAND_NAME=$(openssl rand -hex 12)
+          ARCHIVE="stream_${RAND_NAME}.7z"
+          7z a -p"$ENCRYPT_PASS" -mhe=on -mx=0 "$ARCHIVE" "$M3U_FILE"
+
+          shred -u "$M3U_FILE"
+          rm -rf "$TMPDIR_PATH"
+
+          echo "archive=$ARCHIVE" >> $GITHUB_OUTPUT
+
+      # ─── MODE: download ────────────────────────────────────────────────────
+      - name: Download VOD / Clip
+        if: github.event.inputs.mode == 'download'
+        id: download
+        env:
+          INPUT_TARGET: ${{ github.event.inputs.target }}
+          INPUT_QUALITY: ${{ github.event.inputs.quality }}
+          INPUT_FOLDER: ${{ github.event.inputs.output_folder }}
+          INPUT_USE_COOKIES: ${{ github.event.inputs.use_cookies }}
+          TWITCH_COOKIES: ${{ secrets.TWITCH_COOKIES }}
+        shell: bash
+        run: |
+          echo "::add-mask::$INPUT_TARGET"
+
+          if [[ "$INPUT_TARGET" =~ ^https?:// ]]; then
+            URL="$INPUT_TARGET"
+          else
+            URL="https://www.twitch.tv/videos/$INPUT_TARGET"
+          fi
+
+          mkdir -p "$INPUT_FOLDER"
+          touch marker
+
+          COOKIE_ARG=""
+          if [[ "$INPUT_USE_COOKIES" == "true" && -n "$TWITCH_COOKIES" ]]; then
+            printf '%s' "$TWITCH_COOKIES" > /tmp/tw_cookies.txt
+            COOKIE_ARG="--cookies /tmp/tw_cookies.txt"
+          fi
+
+          case "$INPUT_QUALITY" in
+            best)       FORMAT="bestvideo+bestaudio/best" ;;
+            720p60)     FORMAT="720p60/bestvideo[height<=720]+bestaudio/best" ;;
+            480p)       FORMAT="480p/bestvideo[height<=480]+bestaudio/best" ;;
+            360p)       FORMAT="360p/bestvideo[height<=360]+bestaudio/best" ;;
+            audio_only) FORMAT="bestaudio/best" ;;
+            worst)      FORMAT="worst" ;;
+            *)          FORMAT="$INPUT_QUALITY" ;;
+          esac
+
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          SUCCESS=false
+
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "Attempt $((RETRY_COUNT+1))/$MAX_RETRIES"
+
+            yt-dlp \
+              --output "./$INPUT_FOLDER/%(uploader)s - %(title)s - %(id)s.%(ext)s" \
+              --format "$FORMAT" \
+              --merge-output-format mp4 \
+              --concurrent-fragments 8 \
+              --retries 3 \
+              --fragment-retries 10 \
+              --no-check-certificate \
+              --xff default \
+              --no-color \
+              --newline \
+              $COOKIE_ARG \
+              "$URL" && {
+                NEW_FILE=$(find "$INPUT_FOLDER" -type f -newer marker -print -quit)
+                if [ -n "$NEW_FILE" ]; then
+                  SUCCESS=true
+                  break
+                fi
+              } || echo "Attempt failed"
+
+            RETRY_COUNT=$((RETRY_COUNT+1))
+            [ $RETRY_COUNT -lt $MAX_RETRIES ] && sleep 5
+          done
+
+          if [ -f /tmp/tw_cookies.txt ]; then shred -u /tmp/tw_cookies.txt; fi
+
+          if [ "$SUCCESS" = false ]; then
+            echo "All attempts failed"
+            exit 1
+          fi
+
+          echo "filepath=$NEW_FILE" >> $GITHUB_OUTPUT
+
+      - name: Encrypt download
+        if: github.event.inputs.mode == 'download'
+        env:
+          ENCRYPT_PASS: ${{ secrets.ENCRYPT_PASSWORD }}
+          INPUT_FOLDER: ${{ github.event.inputs.output_folder }}
+          FILEPATH: ${{ steps.download.outputs.filepath }}
+        shell: bash
+        run: |
+          if [ -z "$ENCRYPT_PASS" ]; then
+            echo "ERROR: ENCRYPT_PASSWORD secret is not set"
+            exit 1
+          fi
+
+          RAND_NAME=$(openssl rand -hex 16)
+          SIZE_MB=$(echo "scale=2; $(stat -c %s "$FILEPATH") / 1048576" | bc)
+          ARCHIVE="$INPUT_FOLDER/${RAND_NAME}.7z"
+
+          if (( $(echo "$SIZE_MB > 99" | bc -l) )); then
+            7z a -p"$ENCRYPT_PASS" -mhe=on -mx=0 -v95m "$ARCHIVE" "$FILEPATH"
+          else
+            7z a -p"$ENCRYPT_PASS" -mhe=on -mx=0 "$ARCHIVE" "$FILEPATH"
+          fi
+
+          shred -u "$FILEPATH"
+          ls -lh "$INPUT_FOLDER/"
+
+      # ─── COMMIT ────────────────────────────────────────────────────────────
+      - name: Commit and push
+        env:
+          INPUT_FOLDER: ${{ github.event.inputs.output_folder }}
+          INPUT_MODE: ${{ github.event.inputs.mode }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ "$INPUT_MODE" = "live_url" ]; then
+            git add stream_*.7z
+          else
+            git add "$INPUT_FOLDER/"
+          fi
+
+          git commit -m "Update" || echo "Nothing to commit"
+          git push
