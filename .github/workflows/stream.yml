@@ -21,10 +21,10 @@ on:
         type: string
         default: 'best'
       output_folder:
-        description: 'Folder for saved files (download mode only)'
+        description: 'Folder for saved files'
         required: false
         type: string
-        default: 'downloads'
+        default: 'downloads/twitch'
       use_cookies:
         description: 'Use TWITCH_COOKIES for subscriber-only content'
         required: false
@@ -60,6 +60,7 @@ jobs:
         env:
           INPUT_TARGET: ${{ github.event.inputs.target }}
           INPUT_QUALITY: ${{ github.event.inputs.quality }}
+          INPUT_FOLDER: ${{ github.event.inputs.output_folder }}
           INPUT_USE_COOKIES: ${{ github.event.inputs.use_cookies }}
           TWITCH_COOKIES: ${{ secrets.TWITCH_COOKIES }}
           ENCRYPT_PASS: ${{ secrets.ENCRYPT_PASSWORD }}
@@ -123,8 +124,9 @@ jobs:
           printf '#EXTM3U\n#EXTINF:-1,Stream\n%s\n' "$STREAM_URL" > "$M3U_FILE"
 
           # Encrypt so the URL is not visible in the public repo
+          mkdir -p "$INPUT_FOLDER"
           RAND_NAME=$(openssl rand -hex 12)
-          ARCHIVE="stream_${RAND_NAME}.7z"
+          ARCHIVE="$INPUT_FOLDER/${RAND_NAME}.7z"
           7z a -p"$ENCRYPT_PASS" -mhe=on -mx=0 "$ARCHIVE" "$M3U_FILE"
 
           shred -u "$M3U_FILE"
@@ -241,17 +243,12 @@ jobs:
       - name: Commit and push
         env:
           INPUT_FOLDER: ${{ github.event.inputs.output_folder }}
-          INPUT_MODE: ${{ github.event.inputs.mode }}
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if [ "$INPUT_MODE" = "live_url" ]; then
-            git add stream_*.7z
-          else
-            git add "$INPUT_FOLDER/"
-          fi
+          git add "$INPUT_FOLDER/"
 
           git commit -m "Update" || echo "Nothing to commit"
           git push

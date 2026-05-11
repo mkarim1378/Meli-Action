@@ -16,7 +16,7 @@ on:
         description: 'Folder where the video will be saved'
         required: false
         type: string
-        default: 'downloads'
+        default: 'downloads/media'
       quality:
         description: 'Video quality (yt-dlp format selector)'
         required: true
