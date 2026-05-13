@@ -1,5 +1,4 @@
-name: MHTML ذخیره صفحه به 
-
+name: ذخیره صفحه به MHTML
 
 on:
   workflow_dispatch:
@@ -9,44 +8,55 @@ on:
         required: true
         type: string
       title:
-        description: 'Optional title for the output file (no spaces/special chars)'
+        description: 'Optional filename (no spaces or special chars)'
         required: false
         type: string
 
-        
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+        uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
-          pip install pyppeteer
+          pip install -q playwright
+          playwright install chromium --with-deps
 
       - name: Run MHTML downloader
+        env:
+          INPUT_URL: ${{ github.event.inputs.url }}
+          INPUT_TITLE: ${{ github.event.inputs.title }}
+        shell: bash
         run: |
-          python save_as_mhtml.py \
-            --url "${{ github.event.inputs.url }}" \
-            ${GITHUB_ACTOR:+--title "${{ github.event.inputs.title }}"}
+          echo "::add-mask::$INPUT_URL"
 
+          if [[ ! "$INPUT_URL" =~ ^https?:// ]]; then
+            echo "ERROR: Invalid URL"
+            exit 1
+          fi
 
+          TITLE_ARG=""
+          if [ -n "$INPUT_TITLE" ]; then
+            TITLE_ARG="--title $INPUT_TITLE"
+          fi
 
-      - name: Commit and push download folder to repo
+          python save_as_mhtml.py --url "$INPUT_URL" $TITLE_ARG
+
+      - name: Commit and push
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add download/
-          git commit -m "Add MHTML archive for ${{ github.event.inputs.url }}" || echo "No changes to commit"
+          git add downloads/mhtml/
+          git commit -m "Update" || echo "Nothing to commit"
           git push
