@@ -11,6 +11,16 @@ on:
         description: 'Optional filename (no spaces or special chars)'
         required: false
         type: string
+      use_cookies:
+        description: 'Use MHTML_COOKIES secret (for pages requiring login)'
+        required: false
+        type: boolean
+        default: false
+      output_folder:
+        description: 'Folder for saved files'
+        required: false
+        type: string
+        default: 'downloads/mhtml'
 
 permissions:
   contents: write
@@ -32,10 +42,14 @@ jobs:
           pip install -q playwright
           playwright install chromium --with-deps
 
-      - name: Run MHTML downloader
+      - name: Download page as MHTML
+        id: download
         env:
           INPUT_URL: ${{ github.event.inputs.url }}
           INPUT_TITLE: ${{ github.event.inputs.title }}
+          INPUT_FOLDER: ${{ github.event.inputs.output_folder }}
+          INPUT_USE_COOKIES: ${{ github.event.inputs.use_cookies }}
+          MHTML_COOKIES: ${{ secrets.MHTML_COOKIES }}
         shell: bash
         run: |
           echo "::add-mask::$INPUT_URL"
@@ -45,18 +59,74 @@ jobs:
             exit 1
           fi
 
-          TITLE_ARG=""
+          # Determine filename
           if [ -n "$INPUT_TITLE" ]; then
-            TITLE_ARG="--title $INPUT_TITLE"
+            BASE_NAME="$INPUT_TITLE"
+          else
+            BASE_NAME=$(python3 -c "
+from urllib.parse import urlparse
+import re
+p = urlparse('$INPUT_URL')
+name = p.path.strip('/').replace('/','_') or p.netloc or 'webpage'
+print(re.sub(r'[\\\\/*?:\"<>|]', '_', name)[:80])
+")
           fi
 
-          python save_as_mhtml.py --url "$INPUT_URL" $TITLE_ARG
+          MHTML_PATH="/tmp/mhtml_work/${BASE_NAME}.mhtml"
+          mkdir -p /tmp/mhtml_work
+
+          # Cookie handling
+          COOKIE_ARG=""
+          if [[ "$INPUT_USE_COOKIES" == "true" && -n "$MHTML_COOKIES" ]]; then
+            printf '%s' "$MHTML_COOKIES" > /tmp/mhtml_cookies.txt
+            COOKIE_ARG="--cookies-file /tmp/mhtml_cookies.txt"
+          fi
+
+          python save_as_mhtml.py \
+            --url "$INPUT_URL" \
+            --output "$MHTML_PATH" \
+            $COOKIE_ARG
+
+          if [ -f /tmp/mhtml_cookies.txt ]; then
+            shred -u /tmp/mhtml_cookies.txt
+          fi
+
+          echo "filepath=$MHTML_PATH" >> $GITHUB_OUTPUT
+          echo "basename=$BASE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Encrypt and save
+        env:
+          ENCRYPT_PASS: ${{ secrets.ENCRYPT_PASSWORD }}
+          INPUT_FOLDER: ${{ github.event.inputs.output_folder }}
+          FILEPATH: ${{ steps.download.outputs.filepath }}
+        shell: bash
+        run: |
+          if [ -z "$ENCRYPT_PASS" ]; then
+            echo "ERROR: ENCRYPT_PASSWORD secret is not set"
+            exit 1
+          fi
+
+          sudo apt-get install -y p7zip-full -qq
+
+          mkdir -p "$INPUT_FOLDER"
+
+          RAND_NAME=$(openssl rand -hex 16)
+          ARCHIVE="$INPUT_FOLDER/${RAND_NAME}.7z"
+
+          # -mhe=on encrypts headers too — filename inside archive is hidden without password
+          7z a -p"$ENCRYPT_PASS" -mhe=on -mx=3 "$ARCHIVE" "$FILEPATH"
+
+          shred -u "$FILEPATH"
+          rm -rf /tmp/mhtml_work
+          ls -lh "$INPUT_FOLDER/"
 
       - name: Commit and push
+        env:
+          INPUT_FOLDER: ${{ github.event.inputs.output_folder }}
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/mhtml/
+          git add "$INPUT_FOLDER/"
           git commit -m "Update" || echo "Nothing to commit"
           git push
