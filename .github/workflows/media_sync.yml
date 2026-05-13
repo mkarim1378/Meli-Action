@@ -67,11 +67,12 @@ jobs:
           mkdir -p "$INPUT_FOLDER"
           touch marker
 
-          COOKIE_ARG=""
-          if [[ "$INPUT_USE_COOKIES" == "true" && -n "$PH_COOKIES" ]]; then
-            printf '%s' "$PH_COOKIES" > /tmp/ph_cookies.txt
-            COOKIE_ARG="--cookies /tmp/ph_cookies.txt"
+          # Cookies are required — site serves incomplete HTML to datacenter IPs without login
+          if [ -z "$PH_COOKIES" ]; then
+            echo "ERROR: PH_COOKIES secret is not set. Cookies are required."
+            exit 1
           fi
+          printf '%s' "$PH_COOKIES" > /tmp/ph_cookies.txt
 
           MAX_RETRIES=5
           RETRY_COUNT=0
@@ -88,10 +89,12 @@ jobs:
               --retries 3 \
               --fragment-retries 10 \
               --no-check-certificate \
-              --xff default \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
+              --add-headers "Accept-Language:en-US,en;q=0.9" \
+              --sleep-requests 2 \
               --no-color \
               --newline \
-              $COOKIE_ARG \
+              --cookies /tmp/ph_cookies.txt \
               "$INPUT_URL" && {
 
                 NEW_FILE=$(find "$INPUT_FOLDER" -type f -newer marker -print -quit)
@@ -106,7 +109,12 @@ jobs:
               } || echo "Attempt failed"
 
             RETRY_COUNT=$((RETRY_COUNT+1))
-            [ $RETRY_COUNT -lt $MAX_RETRIES ] && sleep 5
+            # Exponential backoff: 15s, 30s, 60s, 120s
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              SLEEP_TIME=$(( 15 * (1 << (RETRY_COUNT - 1)) ))
+              echo "Waiting ${SLEEP_TIME}s before next attempt..."
+              sleep $SLEEP_TIME
+            fi
           done
 
           # Securely wipe the cookie file regardless of outcome
