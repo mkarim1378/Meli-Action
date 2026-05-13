@@ -63,13 +63,15 @@ jobs:
           if [ -n "$INPUT_TITLE" ]; then
             BASE_NAME="$INPUT_TITLE"
           else
-            BASE_NAME=$(python3 -c "
-from urllib.parse import urlparse
-import re
-p = urlparse('$INPUT_URL')
-name = p.path.strip('/').replace('/','_') or p.netloc or 'webpage'
-print(re.sub(r'[\\\\/*?:\"<>|]', '_', name)[:80])
-")
+            URL_NO_PROTO="${INPUT_URL#*://}"
+            URL_NO_QUERY="${URL_NO_PROTO%%\?*}"
+            URL_NO_FRAG="${URL_NO_QUERY%%#*}"
+            DOMAIN="${URL_NO_FRAG%%/*}"
+            PATH_PART="${URL_NO_FRAG#*/}"
+            PATH_CLEAN="${PATH_PART//\//_}"
+            RAW="${PATH_CLEAN:-$DOMAIN}"
+            BASE_NAME=$(echo "$RAW" | tr -d '\\/*?:"<>|' | cut -c1-80)
+            BASE_NAME="${BASE_NAME:-webpage}"
           fi
 
           MHTML_PATH="/tmp/mhtml_work/${BASE_NAME}.mhtml"
